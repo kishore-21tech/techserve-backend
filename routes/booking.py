@@ -2,7 +2,6 @@ from flask import Blueprint, request, jsonify
 from firebase_config import db
 from firebase_admin import firestore
 import uuid
-from datetime import datetime
 
 booking_bp = Blueprint('booking', __name__)
 
@@ -18,22 +17,29 @@ def create_booking():
         "booking_id": booking_id,
         "customer_uid": data.get('customer_uid'),
         "customer_name": data.get('customer_name'),
-        "appliance_type": data.get('appliance_type'),  # e.g. AC, Washing Machine
+        "customer_phone": data.get('customer_phone', ''),
+        "appliance_type": data.get('appliance_type'),
         "issue_description": data.get('issue_description'),
         "address": data.get('address'),
-        "location": data.get('location'),  # {lat, lng}
+        "location": data.get('location', {"lat": 0.0, "lng": 0.0}),
+        "customer_live_location": {"lat": 0.0, "lng": 0.0},
         "date": data.get('date'),
         "time_slot": data.get('time_slot'),
-        "status": "pending",              # pending > assigned > in_progress > completed
+        "status": "pending",
         "technician_uid": None,
         "technician_name": None,
+        "rated": False,
         "created_at": firestore.SERVER_TIMESTAMP
     }
 
     db.collection('bookings').document(booking_id).set(booking)
 
-    # Auto-assign technician based on appliance type
-    assigned = auto_assign_technician(booking_id, data.get('appliance_type'), data.get('location'))
+    # Auto-assign technician
+    assigned = auto_assign_technician(
+        booking_id,
+        data.get('appliance_type'),
+        data.get('location')
+    )
 
     return jsonify({
         "message": "Booking created",
@@ -49,7 +55,6 @@ def auto_assign_technician(booking_id, appliance_type, customer_location):
     try:
         techs = db.collection('users').where('role', '==', 'technician')\
                                        .where('status', '==', 'online').stream()
-
         best_tech = None
         for tech in techs:
             t = tech.to_dict()
@@ -64,11 +69,45 @@ def auto_assign_technician(booking_id, appliance_type, customer_location):
                 "technician_name": best_tech['name'],
                 "status": "assigned"
             })
-            # Notify technician (via Firebase notification in real app)
             return {"name": best_tech['name'], "uid": best_tech['uid']}
         return None
     except Exception as e:
+        print(f"Auto assign error: {e}")
         return None
+
+
+# ─────────────────────────────────────────
+# UPDATE CUSTOMER LIVE LOCATION
+# ─────────────────────────────────────────
+@booking_bp.route('/customer-location/<booking_id>', methods=['PUT'])
+def update_customer_location(booking_id):
+    data = request.json
+    try:
+        db.collection('bookings').document(booking_id).update({
+            "customer_live_location": {
+                "lat": data.get('lat'),
+                "lng": data.get('lng')
+            }
+        })
+        return jsonify({"message": "Customer location updated"}), 200
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+# ─────────────────────────────────────────
+# GET CUSTOMER LIVE LOCATION (for technician)
+# ─────────────────────────────────────────
+@booking_bp.route('/customer-location/<booking_id>', methods=['GET'])
+def get_customer_location(booking_id):
+    try:
+        doc = db.collection('bookings').document(booking_id).get()
+        if not doc.exists:
+            return jsonify({"error": "Booking not found"}), 404
+        data = doc.to_dict()
+        location = data.get('customer_live_location', {"lat": 0.0, "lng": 0.0})
+        return jsonify({"location": location}), 200
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
 
 # ─────────────────────────────────────────
@@ -103,7 +142,7 @@ def get_technician_bookings(uid):
 @booking_bp.route('/status/<booking_id>', methods=['PUT'])
 def update_status(booking_id):
     data = request.json
-    status = data.get('status')  # assigned, in_progress, completed, cancelled
+    status = data.get('status')
     try:
         db.collection('bookings').document(booking_id).update({"status": status})
         return jsonify({"message": f"Status updated to {status}"}), 200
